@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audizy</title>
+    <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+    <div class="app">
+        <div class="app-body">
+            <div id="palette" class="tool-palette left"></div>
+
+            <div class="app-content">
+                <div id="empty" class="app-empty-shell">
+                    <div class="app-empty">
+                        <p>Waiting for audio</p>
+                        <p class="hint">Select the audio layer, then click the precompose icon (sidebar)</p>
+                    </div>
+                </div>
+
+                <div id="timeline" class="timeline hidden">
+                    <div id="canvasWrap" class="timeline-canvas-wrapper">
+                        <canvas id="tl" class="timeline-canvas"></canvas>
+                        <div id="scrollbar" class="timeline-scrollbar">
+                            <div id="scrollThumb" class="timeline-scrollbar-thumb"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="logPanel" class="log-panel hidden">
+        <div class="log-head">
+            <span class="log-title">Log</span>
+            <span class="log-spacer"></span>
+            <button id="logCopy" class="log-btn">Copy</button>
+            <button id="logClear" class="log-btn">Clear</button>
+            <button id="logClose" class="log-btn">×</button>
+        </div>
+        <textarea id="logBody" class="log-body" readonly></textarea>
+    </div>
+
+    <div id="toast"></div>
+
+    <script src="js/CSInterface.js"></script>
+    <script src="js/waveform.js"></script>
+    <script src="js/icons.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
