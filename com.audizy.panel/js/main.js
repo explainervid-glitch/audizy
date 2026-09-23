@@ -16,7 +16,7 @@
     }
 
     // ---- constants --------------------------------------------------------
-    var RULER_H = 28, LANE_H = 48, SCROLL_H = 16, LANE_TOP = 32;
+    var RULER_H = 20, LANE_H = 48, SCROLL_H = 16, LANE_TOP = 24;
     function rulerTop() { return 0; }   // ruler drawn at the top
     var TOOLS = [
         { id: "pointer", icon: "pointer", label: "Selection Tool", key: "V" },
@@ -41,8 +41,12 @@
         group: null, peaks: null, tool: "pointer",
         view: { start: 0, pps: 100 },
         playhead: 0, selRcId: null, hoverX: -1, snap: true,
+        snapClip: true, snapPlayhead: true,   // magnetic snapping toggles
         track: { muted: false, solo: false, locked: false },
-        playing: false, playT0: 0, playWall: 0, lastPush: 0, playRAF: 0
+        playing: false, playT0: 0, playWall: 0, lastPush: 0, playRAF: 0,
+        vgain: 1,          // vertical (amplitude) zoom
+        peakCache: {},     // sourcePath -> envelope data | null  (multi-file safe)
+        peakReq: {}        // sourcePath -> true (load requested/in-flight)
     };
     var drag = null, toastTimer = null;
 
@@ -111,6 +115,48 @@
     function contentStart() { return st.group ? st.group.groupStart : 0; }
     function contentEnd() { return st.group ? st.group.groupEnd : 10; }
 
+    // ---- magnetic snapping ------------------------------------------------
+    var SNAP_PX = 8;                                   // grab radius in pixels
+    function snapThr() { return SNAP_PX / st.view.pps; }
+    function clipEdges(excludeRcId) {                  // in/out of every other clip
+        var out = [], segs = st.group ? st.group.segments : [], i;
+        for (i = 0; i < segs.length; i++) {
+            if (excludeRcId && segs[i].rcId === excludeRcId) continue;
+            out.push(segs[i].inPoint); out.push(segs[i].outPoint);
+        }
+        return out;
+    }
+    function snapNearest(v, targets) {                 // snap v to closest target within thr
+        var thr = snapThr(), best = v, bd = thr, i;
+        for (i = 0; i < targets.length; i++) {
+            var d = Math.abs(targets[i] - v);
+            if (d < bd) { bd = d; best = targets[i]; }
+        }
+        return best;
+    }
+    function playheadSnap(t) {                          // playhead → clip edges
+        if (!st.snapPlayhead || !st.group) return t;
+        return snapNearest(t, clipEdges(null));
+    }
+
+    // ---- per-source waveform cache (each clip draws its own file) ----------
+    function requestPeaks(path) {
+        if (!path || st.peakReq[path]) return;
+        st.peakReq[path] = true;
+        window.AudizyWave.getPeaks(extRoot, path, function (data) {
+            st.peakCache[path] = data || null;
+            if (!data) toast("Waveform: " + (window.AudizyWave.lastError() || "decode failed"), true);
+            render();
+        });
+    }
+    function peaksFor(seg) {
+        var p = seg && seg.sourcePath;
+        if (!p) return null;
+        if (st.peakCache.hasOwnProperty(p)) return st.peakCache[p];
+        requestPeaks(p);
+        return null;
+    }
+
     // ---- palette ----------------------------------------------------------
     function paletteAction(id, icon, label, handler) {
         var b = document.createElement("button");
@@ -124,6 +170,11 @@
         var grid = document.createElement("div"); grid.className = "palette-tools";
         grid.appendChild(paletteAction("btnLog", "log", "Log", function () { logPanelEl.classList.toggle("hidden"); }));
         grid.appendChild(paletteAction("btnLoad", "precompose", "Precompose / load audio", load));
+        var play = document.createElement("button");
+        play.id = "btnPlay"; play.className = "tool-btn"; play.innerHTML = window.AudizyIcons.play;
+        play.title = "Play / Stop (Space)";
+        play.addEventListener("click", togglePlay);
+        grid.appendChild(play);
         var divider = document.createElement("div"); divider.className = "palette-divider";
         grid.appendChild(divider);
         for (var i = 0; i < TOOLS.length; i++) {
@@ -138,7 +189,21 @@
                 grid.appendChild(b);
             })(TOOLS[i]);
         }
+        var div2 = document.createElement("div"); div2.className = "palette-divider";
+        grid.appendChild(div2);
+        grid.appendChild(makeToggle("snapClip", "magnet", "Clip Snapping", st.snapClip,
+            function (on) { st.snapClip = on; }));
+        grid.appendChild(makeToggle("snapHead", "magnetHead", "Playhead Snapping", st.snapPlayhead,
+            function (on) { st.snapPlayhead = on; }));
         pal.appendChild(grid);
+    }
+    function makeToggle(id, icon, label, initial, fn) {
+        var b = document.createElement("button");
+        b.id = id; b.className = "tool-btn" + (initial ? " active" : "");
+        b.innerHTML = window.AudizyIcons[icon] + '<span class="tool-tooltip">' + label + '</span>';
+        var on = initial;
+        b.addEventListener("click", function () { on = !on; b.classList.toggle("active", on); fn(on); });
+        return b;
     }
     function setTool(id) {
         st.tool = id;
@@ -191,9 +256,10 @@
         var y = LANE_TOP + 2, hh = LANE_H - 4;
         ctx.fillStyle = !seg.audioEnabled ? "#3a2e2e" : (sel ? "#3f6da0" : "#2f4a63");
         ctx.fillRect(x0, y, w, hh);
-        if (st.peaks) {
-            window.AudizyWave.drawPeaksRange(ctx, st.peaks, seg.srcIn, seg.srcOut,
-                x0 + 1, y + 2, w - 2, hh - 4, sel ? "#cfe6ff" : "#8fc4ff", 1.6);
+        var pk = peaksFor(seg);
+        if (pk) {
+            window.AudizyWave.drawPeaksRange(ctx, pk, seg.srcIn, seg.srcOut,
+                x0 + 1, y + 2, w - 2, hh - 4, sel ? "#cfe6ff" : "#8fc4ff", 1.6 * st.vgain);
         }
         ctx.strokeStyle = sel ? css("--color-focus") : css("--color-border");
         ctx.lineWidth = sel ? 2 : 1;
@@ -218,13 +284,13 @@
         ctx.beginPath(); ctx.moveTo(0, ry + 0.5); ctx.lineTo(w, ry + 0.5); ctx.stroke();
         var step = niceStep(st.view.pps);
         var t0 = Math.floor(st.view.start / step) * step;
-        ctx.fillStyle = css("--color-text-muted");
-        ctx.strokeStyle = "rgba(255,255,255,0.12)";
+        ctx.fillStyle = "#dcdcdc";
+        ctx.strokeStyle = "rgba(255,255,255,0.18)";
         ctx.font = "9px Consolas, monospace"; ctx.lineWidth = 1;
         for (var t = t0; timeToX(t) < w; t += step) {
             var x = timeToX(t); if (x < -50) continue;
-            ctx.beginPath(); ctx.moveTo(x + 0.5, ry); ctx.lineTo(x + 0.5, ry + 6); ctx.stroke();
-            ctx.fillText(fmt(t), x + 3, ry + 17);
+            ctx.beginPath(); ctx.moveTo(x + 0.5, ry); ctx.lineTo(x + 0.5, ry + 4); ctx.stroke();
+            ctx.fillText(fmt(t), x + 3, ry + 13);
         }
     }
     function drawPlayhead(h) {
@@ -283,20 +349,22 @@
         st.lastSig = stateSig(res.segments);
         if (st.selRcId && !selSeg()) st.selRcId = null;
         emptyEl.classList.add("hidden"); timelineEl.classList.remove("hidden");
-        if (res.sourcePath) {
-            window.AudizyWave.getPeaks(extRoot, res.sourcePath, function (data) {
-                st.peaks = data;
-                if (!data) toast("Waveform: " + (window.AudizyWave.lastError() || "decode failed"), true);
-                render();
-            });
-        } else {
-            st.peaks = null;
-            toast("No source file path on layer", true);
-        }
+        // request a waveform for every clip's own source (multi-file safe)
+        var segs = res.segments || [];
+        for (var i = 0; i < segs.length; i++) requestPeaks(segs[i].sourcePath);
         resize();
         if (doFit) fit();
     }
-    function load() { callJSX("precomposeSelectedAudio", [], function (res) { applyGroup(res, true); }); }
+    function load() {
+        callJSX("azNeedsPrecompose", [], function (chk) {
+            var name = "";
+            if (chk && chk.precompose) {   // fresh audio → ask a name; loading existing → no dialog
+                name = window.prompt("Precomp name:", "Audizy - Audio");
+                if (name === null) return;
+            }
+            callJSX("precomposeSelectedAudio", [name], function (res) { applyGroup(res, true); });
+        });
+    }
     function reload() { if (st.group && st.group.precompId != null) callJSX("getPrecompState", [st.group.precompId], function (res) { applyGroup(res, false); }); }
     function afterEdit(msg) {
         return function (res) { if (res && res.success) { toast(msg); applyGroup(res, false); } else toast((res && res.error) || "Failed", true); };
@@ -322,7 +390,7 @@
     function listFromSegments() {
         var segs = st.group.segments, list = { v: 1, segments: [] };
         for (var i = 0; i < segs.length; i++)
-            list.segments.push({ id: segs[i].rcId, srcIn: segs[i].srcIn, srcOut: segs[i].srcOut, compIn: segs[i].inPoint });
+            list.segments.push({ id: segs[i].rcId, srcIn: segs[i].srcIn, srcOut: segs[i].srcOut, compIn: segs[i].inPoint, name: segs[i].name, src: segs[i].sourcePath });
         return list;
     }
     function applyList(list, msg) {
@@ -340,9 +408,9 @@
         for (var i = 0; i < segs.length; i++) {
             if (segs[i].rcId === seg.rcId) {
                 var mid = segs[i].inPoint + (srcSplit - segs[i].srcIn);   // comp time of the cut
-                list.segments.push({ id: uuidjs(), srcIn: segs[i].srcIn, srcOut: srcSplit, compIn: segs[i].inPoint });
-                list.segments.push({ id: uuidjs(), srcIn: srcSplit, srcOut: segs[i].srcOut, compIn: mid });
-            } else list.segments.push({ id: segs[i].rcId, srcIn: segs[i].srcIn, srcOut: segs[i].srcOut, compIn: segs[i].inPoint });
+                list.segments.push({ id: uuidjs(), srcIn: segs[i].srcIn, srcOut: srcSplit, compIn: segs[i].inPoint, name: segs[i].name, src: segs[i].sourcePath });
+                list.segments.push({ id: uuidjs(), srcIn: srcSplit, srcOut: segs[i].srcOut, compIn: mid, name: segs[i].name, src: segs[i].sourcePath });
+            } else list.segments.push({ id: segs[i].rcId, srcIn: segs[i].srcIn, srcOut: segs[i].srcOut, compIn: segs[i].inPoint, name: segs[i].name, src: segs[i].sourcePath });
         }
         applyList(list, "Cut");
     }
@@ -352,7 +420,7 @@
         if (st.group.segments.length <= 1) { toast("Can't delete the last clip", true); return; }
         var segs = st.group.segments, list = { v: 1, segments: [] };
         for (var i = 0; i < segs.length; i++) if (segs[i].rcId !== s.rcId)
-            list.segments.push({ id: segs[i].rcId, srcIn: segs[i].srcIn, srcOut: segs[i].srcOut, compIn: segs[i].inPoint });
+            list.segments.push({ id: segs[i].rcId, srcIn: segs[i].srcIn, srcOut: segs[i].srcOut, compIn: segs[i].inPoint, name: segs[i].name, src: segs[i].sourcePath });
         st.selRcId = null;
         applyList(list, "Deleted");
     }
@@ -363,31 +431,84 @@
         render();
     }
     function movePlayhead(t) {
-        st.playhead = Math.max(0, t);
+        st.playhead = Math.max(0, playheadSnap(t));
         render();
         if (st.group && st.group.precompId != null) callJSX("azSetCompTime", [st.group.precompId, st.playhead], function () {});
     }
 
-    // ---- transport: local clock drives the panel playhead ------------------
+    // ---- transport: panel drives playback (AE blocks scripts during preview) -
+    // A Web Audio clock moves the playhead and plays the edited clips, so the
+    // red line moves + you hear it, independent of AE.
     function togglePlay() { if (st.playing) stopPlay(); else startPlay(); }
+    function setPlayBtn(key) { var b = $("btnPlay"); if (b) b.innerHTML = window.AudizyIcons[key]; }
+    // load each unique source's AudioBuffer, then callback with {path: buffer}
+    function loadBuffers(paths, done) {
+        var out = {}, uniq = [], i;
+        for (i = 0; i < paths.length; i++) if (paths[i] && uniq.indexOf(paths[i]) < 0) uniq.push(paths[i]);
+        if (!uniq.length) { done(out); return; }
+        var pending = uniq.length, finished = false;
+        for (i = 0; i < uniq.length; i++) {
+            (function (p) {
+                window.AudizyWave.getBuffer(extRoot, p, function (buf) {
+                    out[p] = buf || null;
+                    if (--pending <= 0 && !finished) { finished = true; done(out); }
+                });
+            })(uniq[i]);
+        }
+    }
     function startPlay() {
         if (!st.group) return;
-        st.playing = true;
-        st.playT0 = st.playhead;
-        st.playWall = performance.now();
-        var b = $("btnPlay"); if (b) b.textContent = "⏸";
-        tick();
+        var ctx = window.AudizyWave.context();
+        if (!ctx) { toast("Audio unavailable", true); return; }
+        try { ctx.resume(); } catch (e) {}
+        var segs = st.group.segments, paths = [], i;
+        for (i = 0; i < segs.length; i++) paths.push(segs[i].sourcePath);
+        loadBuffers(paths, function (bufs) {
+            st.playing = true;
+            st.playCtx = ctx;
+            st.playT0 = st.playhead;
+            st.playCtxStart = ctx.currentTime;
+            st.playSources = [];
+            var any = false;
+            for (var j = 0; j < segs.length; j++) {
+                var s = segs[j];
+                if (s.outPoint <= st.playhead) continue;   // already passed
+                var buf = bufs[s.sourcePath];
+                if (!buf) continue;
+                any = true;
+                var when, offset, dur;
+                if (st.playhead <= s.inPoint) {            // starts later
+                    when = st.playCtxStart + (s.inPoint - st.playT0);
+                    offset = s.srcIn; dur = s.outPoint - s.inPoint;
+                } else {                                   // playhead inside clip
+                    when = st.playCtxStart;
+                    offset = s.srcIn + (st.playhead - s.inPoint); dur = s.outPoint - st.playhead;
+                }
+                if (dur <= 0) continue;
+                try {
+                    var src = ctx.createBufferSource();
+                    src.buffer = buf; src.connect(ctx.destination);
+                    src.start(when, Math.max(0, offset), dur);
+                    st.playSources.push(src);
+                } catch (e) { log("play src: " + e); }
+            }
+            if (!any) toast("No audio buffer — moving playhead only", true);
+            setPlayBtn("pause");
+            tick();
+        });
     }
     function stopPlay() {
         st.playing = false;
         if (st.playRAF) { cancelAnimationFrame(st.playRAF); st.playRAF = 0; }
-        var b = $("btnPlay"); if (b) b.textContent = "▶";
+        if (st.playSources) { for (var i = 0; i < st.playSources.length; i++) { try { st.playSources[i].stop(); } catch (e) {} } st.playSources = []; }
+        setPlayBtn("play");
+        if (st.group && st.group.precompId != null) callJSX("azSetCompTime", [st.group.precompId, st.playhead], function () {});
     }
     function tick() {
         if (!st.playing) return;
-        var now = performance.now();
-        st.playhead = st.playT0 + (now - st.playWall) / 1000;
-        var end = (st.group.compDuration || contentEnd());
+        st.playhead = st.playT0 + (st.playCtx.currentTime - st.playCtxStart);
+        if (st.playhead < st.playT0) st.playhead = st.playT0;
+        var end = st.group.groupEnd || st.group.compDuration || contentEnd();
         if (st.playhead >= end) { st.playhead = end; render(); stopPlay(); return; }
         render();
         st.playRAF = requestAnimationFrame(tick);
@@ -399,8 +520,14 @@
 
     canvas.addEventListener("dblclick", function (ev) {
         if (!st.group) return;
-        if (ly(ev) < RULER_H) return;   // double-click a clip to rename the precomp
-        renamePrecomp();
+        if (ly(ev) < RULER_H) return;
+        var seg = segAtTime(xToTime(lx(ev)));   // double-click a clip to rename that layer
+        if (!seg) return;
+        var name = window.prompt("Rename clip:", seg.name || "");
+        if (name === null) return;
+        name = ("" + name).replace(/^\s+|\s+$/g, "");
+        if (!name) { toast("Empty name", true); return; }
+        callJSX("azRenameClip", [st.group.precompId, seg.rcId, name], afterEdit("Renamed"));
     });
     canvas.addEventListener("mousedown", function (ev) {
         if (!st.group) return;
@@ -417,7 +544,7 @@
             if (eh && !st.track.locked && !eh.seg.locked) {
                 selectSeg(eh.seg);
                 drag = { type: "trim", edge: eh.edge, rcId: eh.seg.rcId,
-                         startTime: eh.seg.startTime, sourceDur: st.group.sourceDuration || eh.seg.srcOut };
+                         startTime: eh.seg.startTime, sourceDur: eh.seg.sourceDuration || st.group.sourceDuration || eh.seg.srcOut };
                 return;
             }
         }
@@ -445,6 +572,16 @@
                 if (drag.moved) {
                     var newIn = t2 - drag.grab;
                     if (st.snap) { var fr = st.group.frameRate; newIn = Math.round(newIn * fr) / fr; }
+                    if (st.snapClip) {                       // magnetic: snap in OR out edge to other clips / 0 / playhead
+                        var segLen = drag.origOut - drag.origIn;
+                        var tg = clipEdges(drag.rcId); tg.push(0); tg.push(st.playhead);
+                        var thr = snapThr(), bestDelta = 0, bd = thr, m;
+                        for (m = 0; m < tg.length; m++) {
+                            var di = tg[m] - newIn; if (Math.abs(di) < bd) { bd = Math.abs(di); bestDelta = di; }
+                            var doo = tg[m] - (newIn + segLen); if (Math.abs(doo) < bd) { bd = Math.abs(doo); bestDelta = doo; }
+                        }
+                        newIn += bestDelta;
+                    }
                     if (newIn < 0) newIn = 0;
                     var d = newIn - drag.origIn;
                     var seg = segByRc(drag.rcId);
@@ -455,6 +592,7 @@
             if (drag.type === "trim") {
                 var tx = xToTime(lx(ev));
                 if (st.snap) { var f = st.group.frameRate; tx = Math.round(tx * f) / f; }
+                if (st.snapClip) { var tt = clipEdges(drag.rcId); tt.push(0); tt.push(st.playhead); tx = snapNearest(tx, tt); }
                 var g = segByRc(drag.rcId); if (!g) return;
                 var minDur = 1 / st.group.frameRate;
                 if (drag.edge === "in") {
@@ -489,13 +627,39 @@
     canvas.addEventListener("mouseleave", function () { st.hoverX = -1; if (st.tool === "razor") render(); });
     wrap.addEventListener("wheel", function (ev) {
         ev.preventDefault();
-        if (ev.ctrlKey || ev.metaKey) zoomAt(lx(ev), ev.deltaY < 0 ? 1.15 : 1 / 1.15);
+        if (ev.altKey) {   // vertical (amplitude) zoom
+            st.vgain *= (ev.deltaY < 0 ? 1.15 : 1 / 1.15);
+            if (st.vgain < 0.2) st.vgain = 0.2; if (st.vgain > 12) st.vgain = 12;
+            render();
+        } else if (ev.ctrlKey || ev.metaKey) zoomAt(lx(ev), ev.deltaY < 0 ? 1.15 : 1 / 1.15);
         else { st.view.start += (ev.deltaX || ev.deltaY) / st.view.pps * 0.5; render(); }
     }, { passive: false });
 
     scrollThumb.addEventListener("mousedown", function (ev) {
         ev.stopPropagation();
         drag = { type: "sbar", x0: ev.clientX, start0: st.view.start };
+    });
+
+    // ---- drag & drop: drop an audio file onto the timeline ----------------
+    function dropHint(on) { wrap.style.boxShadow = on ? "inset 0 0 0 2px var(--color-focus)" : ""; }
+    wrap.addEventListener("dragenter", function (ev) { ev.preventDefault(); dropHint(true); });
+    wrap.addEventListener("dragover", function (ev) {
+        ev.preventDefault();
+        if (ev.dataTransfer) ev.dataTransfer.dropEffect = "copy";
+        dropHint(true);
+    });
+    wrap.addEventListener("dragleave", function (ev) { if (ev.target === wrap) dropHint(false); });
+    wrap.addEventListener("drop", function (ev) {
+        ev.preventDefault(); ev.stopPropagation();
+        dropHint(false);
+        if (!st.group || st.group.precompId == null) { toast("Precompose audio first, then drop files", true); return; }
+        var dt = ev.dataTransfer, path = "";
+        if (dt && dt.files && dt.files.length) path = dt.files[0].path || "";   // CEF exposes OS path
+        if (!path) { toast("Could not read dropped file path", true); return; }
+        var x = ev.clientX - canvas.getBoundingClientRect().left;
+        var t = Math.max(0, xToTime(x));
+        if (st.snap && st.group.frameRate) t = Math.round(t * st.group.frameRate) / st.group.frameRate;
+        callJSX("azAddAudioFile", [st.group.precompId, path, t], afterEdit("Added clip"));
     });
 
     // ---- buttons / keys ---------------------------------------------------
@@ -511,6 +675,8 @@
         var k = ev.key.toLowerCase();
         if (k === "k" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); cutAtPlayhead(); return; }
         if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        if (ev.key === " " || k === "spacebar") { ev.preventDefault(); togglePlay(); return; }
+        if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); deleteSel(); return; }
         if (k === "v") setTool("pointer");
         else if (k === "c") setTool("razor");
         else if (k === "h") setTool("hand");
@@ -524,13 +690,14 @@
     // scripts during preview playback, so the playhead catches up on stop.
     var pollInflight = false;
     setInterval(function () {
+        // Follow AE's CTI (mapped from the active comp through the precomp layer).
         if (!st.group || st.group.precompId == null || drag || pollInflight || st.playing) return;
         pollInflight = true;
         callJSX("azGetCompTime", [st.group.precompId], function (res) {
             pollInflight = false;
             if (res && res.success && Math.abs(res.time - st.playhead) > 0.0005) { st.playhead = res.time; render(); }
         });
-    }, 80);
+    }, 150);
 
     // ---- state-change poll: catch AE undo/redo and refresh the clips -------
     var refreshInflight = false;
@@ -543,7 +710,7 @@
             var sig = stateSig(res.segments);
             if (sig !== st.lastSig) applyGroup(res, false);   // layers changed in AE (undo/redo) → refresh
         });
-    }, 500);
+    }, 1200);
 
     // ---- init -------------------------------------------------------------
     buildPalette();

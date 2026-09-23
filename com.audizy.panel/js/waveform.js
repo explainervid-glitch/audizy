@@ -8,7 +8,7 @@
 (function () {
     "use strict";
 
-    var HIRES = 4000;      // envelope buckets per file
+    var HIRES = 16000;     // envelope buckets per file (higher = smoother when zoomed)
     var cache = {};        // path -> { mins, maxs, duration }
     var pending = {};      // path -> [cb,...]
     var lastError = "";
@@ -82,13 +82,16 @@
         if (!ab) { if (!lastError) lastError = "read failed"; done(null); return; }
         var settled = false;
         function ok(d) { if (settled) return; settled = true; done(d); }
+        function keep(buf) {
+            var d = null; try { d = envelopeFromBuffer(buf); } catch (e) { lastError = "envelope: " + e; }
+            if (d) d.buffer = buf;   // keep AudioBuffer for playback
+            ok(d);
+        }
         try {
-            var p = ctx.decodeAudioData(ab, function (buf) {
-                var d = null; try { d = envelopeFromBuffer(buf); } catch (e) { lastError = "envelope: " + e; }
-                ok(d);
-            }, function (err) { lastError = "decode failed: " + (err && err.message ? err.message : err); ok(null); });
+            var p = ctx.decodeAudioData(ab, keep,
+                function (err) { lastError = "decode failed: " + (err && err.message ? err.message : err); ok(null); });
             if (p && typeof p.then === "function") {
-                p.then(function (buf) { ok(envelopeFromBuffer(buf)); }, function (err) { lastError = "decode failed: " + err; ok(null); });
+                p.then(keep, function (err) { lastError = "decode failed: " + err; ok(null); });
             }
         } catch (e) { lastError = "decodeAudioData threw: " + e; ok(null); }
     }
@@ -118,28 +121,37 @@
         var f0 = Math.max(0, srcIn / dur), f1 = Math.min(1, srcOut / dur);
         if (f1 <= f0) return;
         var p0 = f0 * len, p1 = f1 * len, span = p1 - p0;
-        ctx.strokeStyle = color; ctx.lineWidth = 1;
-        ctx.beginPath();
-        var cols = Math.max(1, Math.floor(w));
-        for (var c = 0; c < cols; c++) {
+
+        // sub-pixel columns for a smoother (non-voxel) shape
+        var cols = Math.max(2, Math.floor(w * 2));
+        var topY = new Array(cols), botY = new Array(cols), c;
+        for (c = 0; c < cols; c++) {
             var a = p0 + (c / cols) * span, b = p0 + ((c + 1) / cols) * span;
             var ia = Math.floor(a), ib = Math.max(ia + 1, Math.floor(b));
             var mn = 1, mx = -1;
             for (var k = ia; k < ib && k < len; k++) { if (maxs[k] > mx) mx = maxs[k]; if (mins[k] < mn) mn = mins[k]; }
             if (mn > mx) { mn = 0; mx = 0; }
-            var vmx = mx * gain; if (vmx > 1) vmx = 1; if (vmx < -1) vmx = -1;
-            var vmn = mn * gain; if (vmn < -1) vmn = -1; if (vmn > 1) vmn = 1;
-            var px = x + c + 0.5;
-            ctx.moveTo(px, mid - vmx * half * 0.95);
-            ctx.lineTo(px, mid - vmn * half * 0.95);
+            var vmx = mx * gain; if (vmx > 1) vmx = 1;
+            var vmn = mn * gain; if (vmn < -1) vmn = -1;
+            topY[c] = mid - vmx * half * 0.95;
+            botY[c] = mid - vmn * half * 0.95;
         }
-        ctx.stroke();
+        // filled envelope: top edge left→right, bottom edge right→left
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(x, topY[0]);
+        for (c = 1; c < cols; c++) ctx.lineTo(x + (c / cols) * w, topY[c]);
+        for (c = cols - 1; c >= 0; c--) ctx.lineTo(x + (c / cols) * w, botY[c]);
+        ctx.closePath();
+        ctx.fill();
     }
 
     window.AudizyWave = {
         available: function () { return !!((window.cep && window.cep.fs) || fs); },
         lastError: function () { return lastError; },
         getPeaks: getPeaks,
+        getBuffer: function (extRoot, path, cb) { getPeaks(extRoot, path, function (d) { cb(d ? d.buffer : null); }); },
+        context: function () { return audioCtx(); },
         drawPeaksRange: drawPeaksRange
     };
 })();

@@ -584,7 +584,8 @@ function azStateFromComp(comp) {
             duration: L.outPoint - L.inPoint,
             srcIn: L.inPoint - L.startTime, srcOut: L.outPoint - L.startTime,
             audioEnabled: L.audioEnabled, enabled: L.enabled, locked: L.locked,
-            selected: L.selected, sourcePath: p
+            selected: L.selected, sourcePath: p,
+            sourceDuration: (L.source && L.source.duration) ? L.source.duration : (L.outPoint - L.startTime)
         });
     }
     if (!segs.length) return makeResult(false, "No audio layer inside precomp");
@@ -600,6 +601,28 @@ function azStateFromComp(comp) {
         sourcePath: src, sourceDuration: srcDur || (gEnd - gStart),
         groupStart: gStart, groupEnd: gEnd, segments: segs
     });
+}
+
+/** Find (no import) a footage item already pointing at fsPath. */
+function azFindFootage(fsPath) {
+    if (!fsPath) return null;
+    try {
+        var f = new File(fsPath), i;
+        for (i = 1; i <= app.project.numItems; i++) {
+            var it = app.project.item(i);
+            if (it instanceof FootageItem && it.mainSource && it.mainSource.file &&
+                it.mainSource.file.fsName === f.fsName) return it;
+        }
+    } catch (e) {}
+    return null;
+}
+/** Reuse a footage item pointing at fsPath, importing it if absent. */
+function azFootageForPath(fsPath) {
+    var found = azFindFootage(fsPath);
+    if (found) return found;
+    try { var f = new File(fsPath); if (f.exists) return app.project.importFile(new ImportOptions(f)); }
+    catch (e) {}
+    return null;
 }
 
 /** Find a CompItem by id. */
@@ -676,25 +699,106 @@ function azApply(precompId, editListJson) {
         // remove existing audio layers (high index first)
         for (var i = comp.numLayers; i >= 1; i--) { var Lx = comp.layer(i); if (Lx.hasAudio) Lx.remove(); }
         // lay each segment as a trimmed footage layer at its free comp position
-        var tc = 0, s;
+        var tc = 0, s, maxOut = 0;
         for (s = 0; s < data.segments.length; s++) {
             var seg = data.segments[s];
             var a = seg.srcIn, b = seg.srcOut, dur = b - a;
             if (dur <= 0) continue;
             var ci = (typeof seg.compIn === "number") ? seg.compIn : tc;   // free position
             if (ci < 0) ci = 0;
-            var NL = comp.layers.add(srcItem);
+            var item = srcItem;                              // per-clip source (multi-file safe)
+            if (seg.src) { var f2 = azFootageForPath(seg.src); if (f2) item = f2; }
+            var NL = comp.layers.add(item);
             NL.startTime = ci - a;      // source time (compTime - startTime) = a at ci
             NL.inPoint = ci;
             NL.outPoint = ci + dur;
             NL.comment = setTag(RC_TAG_RE, "RC", NL.comment, seg.id || uuid());
+            if (seg.name) { try { NL.name = seg.name; } catch (e) {} }   // keep custom clip name
             tc = ci + dur;
+            if (NL.outPoint > maxOut) maxOut = NL.outPoint;
+        }
+        // dynamic duration: precomp ends at the last clip
+        if (maxOut > 0) {
+            comp.duration = Math.max(1 / comp.frameRate, maxOut);
+            var host = getActiveComp();
+            if (host) {
+                var PL = azFindPrecompLayer(host, comp);
+                if (PL) { PL.outPoint = PL.startTime + comp.duration; }
+            }
         }
     } catch (e) {
         app.endUndoGroup();
         return makeResult(false, "Apply failed: " + e.toString());
     }
     app.endUndoGroup();
+    return azStateFromComp(comp);
+}
+
+/**
+ * Import an audio file and add it as a new clip (layer) inside the precomp at
+ * comp time compIn. Reuses an existing footage item for the same file. Each clip
+ * keeps its own source, so the precomp can hold several different audio files.
+ */
+function azAddAudioFile(precompId, fsPath, compIn) {
+    var comp = azCompById(precompId);
+    if (!comp) return makeResult(false, "Precomp not found");
+    if (!fsPath) return makeResult(false, "No file path");
+    var f = new File(fsPath);
+    if (!f.exists) return makeResult(false, "File not found: " + fsPath);
+
+    app.beginUndoGroup("Audizy: Add Audio File");
+    try {
+        // was this file already in the project? (so we don't delete a shared import)
+        var existed = !!azFindFootage(f.fsName);
+        var item = azFootageForPath(f.fsName);
+        if (!item) { app.endUndoGroup(); return makeResult(false, "Import failed"); }
+
+        var ci = (typeof compIn === "number" && compIn >= 0) ? compIn : 0;
+        ci = snapToFrame(ci, comp.frameRate);
+        var NL = comp.layers.add(item);
+        NL.startTime = ci;
+        var dur = (item.duration && item.duration > 0) ? item.duration : (NL.outPoint - NL.inPoint);
+        NL.outPoint = ci + dur;   // extend before pinning inPoint
+        NL.inPoint = ci;
+        if (!NL.hasAudio) {
+            NL.remove();
+            if (!existed) { try { item.remove(); } catch (e) {} }   // drop the orphan import
+            app.endUndoGroup();
+            return makeResult(false, "File has no audio");
+        }
+        NL.comment = setTag(RC_TAG_RE, "RC", NL.comment, uuid());
+
+        // grow precomp (and its layer in the host comp) to fit the new clip
+        if (NL.outPoint > comp.duration) {
+            comp.duration = NL.outPoint;
+            var host = getActiveComp();
+            if (host) { var PL = azFindPrecompLayer(host, comp); if (PL) PL.outPoint = PL.startTime + comp.duration; }
+        }
+    } catch (e) { app.endUndoGroup(); return makeResult(false, e.toString()); }
+    app.endUndoGroup();
+    return azStateFromComp(comp);
+}
+
+/** True only when a fresh audio layer is selected (would precompose, not load). */
+function azNeedsPrecompose() {
+    var comp = getActiveComp();
+    if (!comp) return makeResult(false, "No active composition");
+    var L = null;
+    for (var i = 1; i <= comp.numLayers; i++) { var X = comp.layer(i); if (X.selected && X.hasAudio) { L = X; break; } }
+    var pre = !!(L && !(L.source instanceof CompItem && azLayerHasStamp(L)));
+    return ok({ precompose: pre });
+}
+
+/** Rename a clip (audio layer) inside the precomp by its rcId. */
+function azRenameClip(precompId, rcId, newName) {
+    var comp = azCompById(precompId);
+    if (!comp) return makeResult(false, "Precomp not found");
+    if (!newName) return makeResult(false, "Empty name");
+    var L = null;
+    for (var i = 1; i <= comp.numLayers; i++) { if (parseRcId(comp.layer(i).comment) === rcId) { L = comp.layer(i); break; } }
+    if (!L) return makeResult(false, "Clip not found");
+    app.beginUndoGroup("Audizy: Rename Clip");
+    try { L.name = newName; } finally { app.endUndoGroup(); }
     return azStateFromComp(comp);
 }
 
@@ -765,12 +869,28 @@ function renamePrecomp(precompId, newName) {
 }
 
 /** Find a stamped Audizy precomp layer in a comp (source = stamped CompItem). */
-function azFindStampedPrecomp(comp) {
-    for (var i = 1; i <= comp.numLayers; i++) {
-        var L = comp.layer(i);
+/** Find a stamped precomp layer anywhere in the comp hierarchy (nested comps). */
+function azFindStampedRec(comp, seen) {
+    if (!comp || seen["c" + comp.id]) return null;
+    seen["c" + comp.id] = true;
+    var i, L;
+    // direct stamped precomp layer
+    for (i = 1; i <= comp.numLayers; i++) {
+        L = comp.layer(i);
         if (L.hasAudio && L.source instanceof CompItem && azLayerHasStamp(L)) return L;
     }
+    // recurse into any sub-comp
+    for (i = 1; i <= comp.numLayers; i++) {
+        L = comp.layer(i);
+        if (L.source instanceof CompItem) {
+            var r = azFindStampedRec(L.source, seen);
+            if (r) return r;
+        }
+    }
     return null;
+}
+function azFindStampedPrecomp(comp) {
+    return azFindStampedRec(comp, {});
 }
 /** Auto-detect: load an existing Audizy precomp in the active comp, no selection needed. */
 function azAutoDetect() {
@@ -784,7 +904,7 @@ function azAutoDetect() {
     return azStateFromComp(L.source);
 }
 
-function precomposeSelectedAudio() {
+function precomposeSelectedAudio(name) {
     var comp = getActiveComp();
     if (!comp) return makeResult(false, "No active composition");
     var L = null, i;
@@ -811,7 +931,8 @@ function precomposeSelectedAudio() {
     app.beginUndoGroup("Audizy: Precompose Audio");
     try {
         try { if (L.timeRemapEnabled) L.timeRemapEnabled = false; } catch (e) {}   // clean before precompose
-        pre = comp.layers.precompose([L.index], "Audizy - " + L.name, true);  // moveAllAttributes
+        var pName = (name && ("" + name).replace(/^\s+|\s+$/g, "")) || ("Audizy - " + L.name);
+        pre = comp.layers.precompose([L.index], pName, true);  // moveAllAttributes
         PL = azFindPrecompLayer(comp, pre);
         if (PL) azStampLayer(PL);          // stamp the clip, not the comp
     } finally { app.endUndoGroup(); }
@@ -833,17 +954,34 @@ function getPrecompState(precompId) {
     return azStateFromComp(item);
 }
 
-/** Read the precomp comp's current time (for playhead sync). */
-function azGetCompTime(precompId) {
-    var comp = azCompById(precompId);
-    if (!comp) return makeResult(false, "Precomp not found");
-    return ok({ time: comp.time });
+/**
+ * Playhead sync. The precomp is closed, so AE's real CTI lives on the ACTIVE
+ * comp. Map the active comp's time through the precomp layer into precomp time:
+ *   precompTime = (activeComp.time - PL.startTime) * stretch
+ */
+function azPrecompLayerStretch(PL) {
+    var s = 1; try { s = (PL.stretch || 100) / 100; } catch (e) {}
+    return s;
 }
-/** Set the precomp comp's current time (moves its CTI when it is open). */
+function azGetCompTime(precompId) {
+    var pre = azCompById(precompId);
+    if (!pre) return makeResult(false, "Precomp not found");
+    var host = getActiveComp();
+    if (!host) return ok({ time: pre.time });
+    var PL = azFindPrecompLayer(host, pre);
+    if (!PL) return ok({ time: pre.time });
+    var t = (host.time - PL.startTime) * azPrecompLayerStretch(PL);
+    return ok({ time: t });
+}
 function azSetCompTime(precompId, t) {
-    var comp = azCompById(precompId);
-    if (!comp) return makeResult(false, "Precomp not found");
-    comp.time = t;
-    return ok({ time: comp.time });
+    var pre = azCompById(precompId);
+    if (!pre) return makeResult(false, "Precomp not found");
+    var host = getActiveComp();
+    if (!host) { pre.time = t; return ok({ time: t }); }
+    var PL = azFindPrecompLayer(host, pre);
+    if (!PL) { pre.time = t; return ok({ time: t }); }
+    host.time = PL.startTime + t / azPrecompLayerStretch(PL);   // move the real CTI
+    pre.time = t;
+    return ok({ time: t });
 }
 
