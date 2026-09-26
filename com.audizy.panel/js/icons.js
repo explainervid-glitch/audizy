@@ -13,5 +13,7 @@ window.AudizyIcons = {
     play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"/></svg>',
     pause: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>',
     magnet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 4v6a7 7 0 0 0 14 0V4"/><line x1="5" y1="4" x2="9" y2="4"/><line x1="15" y1="4" x2="19" y2="4"/><line x1="5" y1="9" x2="9" y2="9"/><line x1="15" y1="9" x2="19" y2="9"/></svg>',
-    magnetHead: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h6l-3 3z" fill="currentColor"/><line x1="12" y1="6" x2="12" y2="21"/><line x1="5" y1="11" x2="8" y2="11"/><line x1="16" y1="11" x2="19" y2="11"/></svg>'
+    magnetHead: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h6l-3 3z" fill="currentColor"/><line x1="12" y1="6" x2="12" y2="21"/><line x1="5" y1="11" x2="8" y2="11"/><line x1="16" y1="11" x2="19" y2="11"/></svg>',
+    extract: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11"/><path d="M8 7l4-4 4 4"/><path d="M5 13v6a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-6"/></svg>',
+    insert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11"/><path d="M8 10l4 4 4-4"/><path d="M5 13v6a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-6"/></svg>'
 };

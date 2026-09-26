@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Audizy — Runtime Architecture",
+    "output": "audizy-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "primary-path", "label": "Primary edit path", "focus": ["user", "panel-ui", "bridge", "extendscript", "project"], "note": "User edit flows from the panel through the CSInterface bridge into ExtendScript, which mutates the After Effects project." },
+      { "id": "waveform-io", "label": "Waveform & audio I/O", "focus": ["panel-ui", "waveform", "webaudio", "cepfs", "audiofile"], "note": "The panel reads the source file and decodes it with Web Audio to draw peaks and drive playback." },
+      { "id": "ae-host", "label": "After Effects host", "focus": ["bridge", "extendscript", "project"], "note": "ExtendScript is the only writer of AE project state." }
+    ]
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "Editor", "sublabel": "After Effects user", "pos": [40, 440], "size": [120, 60] },
+    { "id": "panel-ui", "type": "frontend", "label": "Panel UI", "sublabel": "main.js — timeline", "pos": [280, 300], "size": [150, 72], "tag": "CEP / CEF" },
+    { "id": "waveform", "type": "frontend", "label": "Waveform Engine", "sublabel": "waveform.js", "pos": [280, 150], "size": [150, 72] },
+    { "id": "webaudio", "type": "external", "label": "Web Audio API", "sublabel": "AudioContext", "pos": [40, 155], "size": [140, 60] },
+    { "id": "cepfs", "type": "external", "label": "CEP File I/O", "sublabel": "cep.fs.readFile", "pos": [580, 155], "size": [140, 60] },
+    { "id": "audiofile", "type": "database", "label": "Audio File", "sublabel": "source on disk", "pos": [800, 155], "size": [150, 60] },
+    { "id": "bridge", "type": "messagebus", "label": "CSInterface Bridge", "sublabel": "evalScript()", "pos": [560, 300], "size": [140, 60] },
+    { "id": "extendscript", "type": "backend", "label": "ExtendScript", "sublabel": "audizy.jsx (ES3)", "pos": [830, 300], "size": [160, 72], "tag": "edit engine" },
+    { "id": "project", "type": "database", "label": "AE Project", "sublabel": "comps · precomp · layers", "pos": [1120, 300], "size": [150, 72] }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "CEP Panel · CEF sandbox", "wraps": ["webaudio", "waveform", "cepfs", "panel-ui", "bridge"] },
+    { "kind": "region", "label": "After Effects 2026 · host process", "wraps": ["extendscript", "project"] }
+  ],
+  "connections": [
+    { "id": "user-edit", "from": "user", "to": "panel-ui", "label": "edit audio", "variant": "emphasis" },
+    { "id": "ui-eval", "from": "panel-ui", "to": "bridge", "label": "evalScript()", "variant": "emphasis" },
+    { "id": "eval-run", "from": "bridge", "to": "extendscript", "label": "run ES3", "variant": "emphasis" },
+    { "id": "es-mutate", "from": "extendscript", "to": "project", "label": "cut · trim · move", "variant": "emphasis" },
+    { "id": "ui-draw", "from": "panel-ui", "to": "waveform", "label": "draw · play" },
+    { "id": "wave-decode", "from": "waveform", "to": "webaudio", "label": "decode · play" },
+    { "id": "wave-read", "from": "waveform", "to": "cepfs", "label": "read file" },
+    { "id": "fs-bytes", "from": "cepfs", "to": "audiofile", "label": "Base64", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Panel (CEF)", "items": ["main.js — canvas timeline, palette, drag-drop, keyboard", "waveform.js — per-source peaks + AudioBufferSourceNode playback", "CSInterface.evalScript is the only call into AE"] },
+    { "dot": "emerald", "title": "ExtendScript (audizy.jsx)", "items": ["ES3, runs inside After Effects — sole writer of project state", "azApply rebuilds precomp clips from an edit list", "Extract / Insert map time through the precomp layer"] },
+    { "dot": "violet", "title": "Sync & playback", "items": ["Time poll 150ms → azGetCompTime follows AE CTI", "State poll 1200ms → getPrecompState catches undo/redo", "Panel self-drives playback (AE blocks scripts during preview)"] },
+    { "dot": "rose", "title": "Trust boundaries", "items": ["CEF sandbox holds the HTML/JS panel", "AE host process holds ES3 + the project model", "Clip identity carried in layer.comment [RC:uuid]"] }
+  ]
+}
