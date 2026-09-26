@@ -779,6 +779,154 @@ function azAddAudioFile(precompId, fsPath, compIn) {
     return azStateFromComp(comp);
 }
 
+/** Find the comp + layer that hosts a precomp (first layer whose source is it). */
+function azFindHostLayer(pre) {
+    for (var i = 1; i <= app.project.numItems; i++) {
+        var it = app.project.item(i);
+        if (!(it instanceof CompItem) || it === pre) continue;
+        for (var j = 1; j <= it.numLayers; j++) {
+            var L = it.layer(j);
+            if (L.source && L.source === pre) return { comp: it, layer: L };
+        }
+    }
+    return null;
+}
+
+/**
+ * Extract the selected clip out of the precomp into its PARENT comp, keeping the
+ * same absolute time position. Moves the clip (removes it from the precomp),
+ * unless it is the last audio layer (then it is copied so the precomp stays valid).
+ */
+function azExtractClip(precompId, rcId) {
+    var pre = azCompById(precompId);
+    if (!pre) return makeResult(false, "Precomp not found");
+    var host = azFindHostLayer(pre);
+    if (!host) return makeResult(false, "Precomp is not used in any comp");
+    var hostComp = host.comp, PL = host.layer;
+
+    var clip = null, i;
+    for (i = 1; i <= pre.numLayers; i++) { if (parseRcId(pre.layer(i).comment) === rcId) { clip = pre.layer(i); break; } }
+    if (!clip) return makeResult(false, "Clip not found");
+    if (!clip.source) return makeResult(false, "Clip has no source");
+
+    var srcIn = clip.inPoint - clip.startTime;          // source seconds at clip in
+    var dur = clip.outPoint - clip.inPoint;             // clip's trimmed duration — keep it exact
+    var s = 1; try { s = (PL.stretch || 100) / 100; } catch (e) {}
+    var hostIn = PL.startTime + clip.inPoint / s;        // map precomp time into parent time
+
+    var audioCount = 0;
+    for (i = 1; i <= pre.numLayers; i++) if (pre.layer(i).hasAudio) audioCount++;
+
+    app.beginUndoGroup("Audizy: Extract Clip");
+    try {
+        var NL = hostComp.layers.add(clip.source);
+        NL.startTime = hostIn - srcIn;                   // source srcIn lands at hostIn
+        NL.inPoint = hostIn;                             // trim head
+        NL.outPoint = hostIn + dur;                      // trim tail to the clip's own length
+        try { NL.name = clip.name; } catch (e) {}
+        NL.comment = setTag(RC_TAG_RE, "RC", NL.comment, uuid());
+        if (audioCount > 1) clip.remove();               // move out; keep the precomp non-empty
+    } catch (e) { app.endUndoGroup(); return makeResult(false, e.toString()); }
+    app.endUndoGroup();
+    return azStateFromComp(pre);
+}
+
+/**
+ * Extract several clips at once (rcIdsJson = JSON array of rcIds). One undo group.
+ * Always leaves at least one audio layer in the precomp so its state stays readable.
+ */
+function azExtractClips(precompId, rcIdsJson) {
+    var pre = azCompById(precompId);
+    if (!pre) return makeResult(false, "Precomp not found");
+    var host = azFindHostLayer(pre);
+    if (!host) return makeResult(false, "Precomp is not used in any comp");
+    var hostComp = host.comp, PL = host.layer;
+
+    var ids; try { ids = JSON.parse(rcIdsJson); } catch (e) { return makeResult(false, "Bad clip list"); }
+    if (!ids || !ids.length) return makeResult(false, "No clips selected");
+
+    var s = 1; try { s = (PL.stretch || 100) / 100; } catch (e) {}
+    var audioCount = 0, i, j;
+    for (i = 1; i <= pre.numLayers; i++) if (pre.layer(i).hasAudio) audioCount++;
+
+    var done = 0, err = null;
+    app.beginUndoGroup("Audizy: Extract Clips");
+    try {
+        for (j = 0; j < ids.length; j++) {
+            var clip = null;
+            for (i = 1; i <= pre.numLayers; i++) { if (parseRcId(pre.layer(i).comment) === ids[j]) { clip = pre.layer(i); break; } }
+            if (!clip || !clip.source) continue;
+
+            var srcIn = clip.inPoint - clip.startTime;
+            var dur = clip.outPoint - clip.inPoint;
+            var hostIn = PL.startTime + clip.inPoint / s;
+
+            var NL = hostComp.layers.add(clip.source);
+            NL.startTime = hostIn - srcIn;
+            NL.inPoint = hostIn;
+            NL.outPoint = hostIn + dur;
+            try { NL.name = clip.name; } catch (e) {}
+            NL.comment = setTag(RC_TAG_RE, "RC", NL.comment, uuid());
+            if (audioCount > 1) { clip.remove(); audioCount--; }   // keep the precomp non-empty
+            done++;
+        }
+    } catch (e) { err = e; }
+    app.endUndoGroup();
+    if (err) return makeResult(false, "Extract: " + err.toString());
+    if (!done) return makeResult(false, "No clips found to extract");
+    return azStateFromComp(pre);
+}
+
+/**
+ * Insert an audio layer into a chosen precomp at its matching time. The user must
+ * select BOTH in the active comp: an audio (footage) layer to move, and a precomp
+ * layer that names the target comp. Works for ANY precomp, not only an Audizy one.
+ * Maps parent time back through the selected precomp layer (startTime + stretch).
+ */
+function azInsertSelected() {
+    var host = getActiveComp();
+    if (!host) return makeResult(false, "No active composition");
+
+    // gather the two required selections from the active comp
+    var SL = null, PL = null, audioN = 0, preN = 0, i;
+    for (i = 1; i <= host.numLayers; i++) {
+        var L = host.layer(i);
+        if (!L.selected) continue;
+        if (L.source instanceof CompItem) { PL = L; preN++; }                  // target precomp layer
+        else if (L.hasAudio && L.source) { SL = L; audioN++; }                 // audio file layer
+    }
+    if (audioN === 0) return makeResult(false, "Select an audio file layer to insert");
+    if (preN === 0) return makeResult(false, "Also select a precomp layer to insert into");
+    if (audioN > 1) return makeResult(false, "Select only ONE audio layer");
+    if (preN > 1) return makeResult(false, "Select only ONE precomp layer");
+    var pre = PL.source;                                  // the target composition
+
+    var s = 1; try { s = (PL.stretch || 100) / 100; } catch (e) {}
+    var srcIn = SL.inPoint - SL.startTime;               // source seconds at layer in
+    var preIn = (SL.inPoint - PL.startTime) * s;         // parent time → precomp time
+    var preOut = (SL.outPoint - PL.startTime) * s;
+    if (preOut <= 0) return makeResult(false, "Audio layer is before the precomp start");
+    if (preIn < 0) { srcIn += (-preIn) / s; preIn = 0; } // clamp head into the precomp (source secs = precomp/s)
+    var dur = preOut - preIn;                            // clip's trimmed duration — keep it exact
+
+    app.beginUndoGroup("Audizy: Insert Clip");
+    try {
+        var NL = pre.layers.add(SL.source);
+        NL.startTime = preIn - srcIn;                    // source srcIn lands at preIn
+        NL.inPoint = preIn;                              // trim head
+        NL.outPoint = preIn + dur;                       // trim tail to the clip's own length
+        try { NL.name = SL.name; } catch (e) {}
+        NL.comment = setTag(RC_TAG_RE, "RC", NL.comment, uuid());
+        if (NL.outPoint > pre.duration) {
+            pre.duration = NL.outPoint;
+            PL.outPoint = PL.startTime + pre.duration / s;   // map precomp duration back to host time
+        }
+        SL.remove();                                     // move it out of the parent comp
+    } catch (e) { app.endUndoGroup(); return makeResult(false, e.toString()); }
+    app.endUndoGroup();
+    return azStateFromComp(pre);
+}
+
 /** True only when a fresh audio layer is selected (would precompose, not load). */
 function azNeedsPrecompose() {
     var comp = getActiveComp();
@@ -907,35 +1055,46 @@ function azAutoDetect() {
 function precomposeSelectedAudio(name) {
     var comp = getActiveComp();
     if (!comp) return makeResult(false, "No active composition");
-    var L = null, i;
-    for (i = 1; i <= comp.numLayers; i++) {
-        var X = comp.layer(i);
-        if (X.selected && X.hasAudio) { L = X; break; }
-    }
+
+    // collect EVERY selected layer (precompose them all together)
+    var sel = [], i;
+    for (i = 1; i <= comp.numLayers; i++) if (comp.layer(i).selected) sel.push(comp.layer(i));
+
     // No selection? Fall back to an existing stamped precomp in the comp.
-    if (!L) {
+    if (!sel.length) {
         var found = azFindStampedPrecomp(comp);
         if (found) { var inr = azInnerAudio(found.source); if (inr) { ensureRcId(inr); return azStateFromComp(found.source); } }
         return makeResult(false, "Select an audio layer first");
     }
 
-    // Already a stamped Audizy precomp clip? Load it, do not precompose again.
-    if (L.source instanceof CompItem && azLayerHasStamp(L)) {
-        var innerExisting = azInnerAudio(L.source);
+    // One already-stamped Audizy precomp clip? Load it, do not precompose again.
+    if (sel.length === 1 && sel[0].source instanceof CompItem && azLayerHasStamp(sel[0])) {
+        var innerExisting = azInnerAudio(sel[0].source);
         if (!innerExisting) return makeResult(false, "No audio layer inside precomp");
         ensureRcId(innerExisting);
-        return azStateFromComp(L.source);
+        return azStateFromComp(sel[0].source);
     }
 
-    var pre, PL;
+    // need at least one audio layer among the selection
+    var hasAudio = false;
+    for (i = 0; i < sel.length; i++) if (sel[i].hasAudio) { hasAudio = true; break; }
+    if (!hasAudio) return makeResult(false, "Select at least one audio layer");
+
+    var indices = [];
+    for (i = 0; i < sel.length; i++) indices.push(sel[i].index);
+
+    var pre = null, PL, err = null;
     app.beginUndoGroup("Audizy: Precompose Audio");
     try {
-        try { if (L.timeRemapEnabled) L.timeRemapEnabled = false; } catch (e) {}   // clean before precompose
-        var pName = (name && ("" + name).replace(/^\s+|\s+$/g, "")) || ("Audizy - " + L.name);
-        pre = comp.layers.precompose([L.index], pName, true);  // moveAllAttributes
+        for (i = 0; i < sel.length; i++) { try { if (sel[i].timeRemapEnabled) sel[i].timeRemapEnabled = false; } catch (e) {} }
+        var pName = (name && ("" + name).replace(/^\s+|\s+$/g, "")) || ("Audizy - " + sel[0].name);
+        // AE forbids moveAllAttributes=false with more than one layer; always true
+        pre = comp.layers.precompose(indices, pName, true);
         PL = azFindPrecompLayer(comp, pre);
         if (PL) azStampLayer(PL);          // stamp the clip, not the comp
-    } finally { app.endUndoGroup(); }
+    } catch (e) { err = e; }
+    app.endUndoGroup();
+    if (err) return makeResult(false, "Precompose: " + err.toString());
 
     if (!(pre instanceof CompItem)) return makeResult(false, "Precompose failed");
     var inner = azInnerAudio(pre);

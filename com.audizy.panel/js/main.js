@@ -40,7 +40,7 @@
     var st = {
         group: null, peaks: null, tool: "pointer",
         view: { start: 0, pps: 100 },
-        playhead: 0, selRcId: null, hoverX: -1, snap: true,
+        playhead: 0, sel: [], hoverX: -1, snap: true,   // sel = selected clip rcIds
         snapClip: true, snapPlayhead: true,   // magnetic snapping toggles
         track: { muted: false, solo: false, locked: false },
         playing: false, playT0: 0, playWall: 0, lastPush: 0, playRAF: 0,
@@ -85,10 +85,19 @@
     function xToTime(x) { return st.view.start + x / st.view.pps; }
     function cssW() { return canvas.clientWidth || 600; }
     function cssH() { return canvas.clientHeight || 200; }
-    function selSeg() {
-        if (!st.group || !st.selRcId) return null;
-        var s = st.group.segments; for (var i = 0; i < s.length; i++) if (s[i].rcId === st.selRcId) return s[i];
-        return null;
+    // ---- selection (multi) ------------------------------------------------
+    function isSel(rcId) { for (var i = 0; i < st.sel.length; i++) if (st.sel[i] === rcId) return true; return false; }
+    function selSegs() {                                  // selected segments, timeline order
+        if (!st.group) return [];
+        var out = [], s = st.group.segments;
+        for (var i = 0; i < s.length; i++) if (isSel(s[i].rcId)) out.push(s[i]);
+        return out;
+    }
+    function selSeg() { var a = selSegs(); return a.length ? a[0] : null; }
+    function setSel(ids) { st.sel = ids || []; }
+    function toggleSel(rcId) {
+        for (var i = 0; i < st.sel.length; i++) if (st.sel[i] === rcId) { st.sel.splice(i, 1); return; }
+        st.sel.push(rcId);
     }
     function segAtTime(t) {
         if (!st.group) return null;
@@ -122,6 +131,16 @@
         var out = [], segs = st.group ? st.group.segments : [], i;
         for (i = 0; i < segs.length; i++) {
             if (excludeRcId && segs[i].rcId === excludeRcId) continue;
+            out.push(segs[i].inPoint); out.push(segs[i].outPoint);
+        }
+        return out;
+    }
+    function clipEdgesExcept(ids) {                    // edges of every clip not in ids
+        var out = [], segs = st.group ? st.group.segments : [], i, j, skip;
+        for (i = 0; i < segs.length; i++) {
+            skip = false;
+            for (j = 0; j < ids.length; j++) if (segs[i].rcId === ids[j]) { skip = true; break; }
+            if (skip) continue;
             out.push(segs[i].inPoint); out.push(segs[i].outPoint);
         }
         return out;
@@ -160,7 +179,7 @@
     // ---- palette ----------------------------------------------------------
     function paletteAction(id, icon, label, handler) {
         var b = document.createElement("button");
-        b.id = id; b.className = "tool-btn";
+        b.id = id; b.className = "tool-btn"; b.title = label;   // native tooltip
         b.innerHTML = window.AudizyIcons[icon] + '<span class="tool-tooltip">' + label + '</span>';
         b.addEventListener("click", handler);
         return b;
@@ -175,6 +194,8 @@
         play.title = "Play / Stop (Space)";
         play.addEventListener("click", togglePlay);
         grid.appendChild(play);
+        grid.appendChild(paletteAction("btnExtract", "extract", "Extract clip to parent comp", extractSel));
+        grid.appendChild(paletteAction("btnInsert", "insert", "Insert: select an audio layer + a precomp layer", insertSel));
         var divider = document.createElement("div"); divider.className = "palette-divider";
         grid.appendChild(divider);
         for (var i = 0; i < TOOLS.length; i++) {
@@ -182,6 +203,7 @@
                 var b = document.createElement("button");
                 b.className = "tool-btn" + (tool.id === st.tool ? " active" : "");
                 b.setAttribute("data-tool", tool.id);
+                b.title = tool.label + " (" + tool.key + ")";   // native tooltip
                 b.innerHTML = window.AudizyIcons[tool.icon] +
                     '<span class="tool-tooltip">' + tool.label +
                     '<span class="tool-tooltip-shortcut">' + tool.key + '</span></span>';
@@ -199,7 +221,7 @@
     }
     function makeToggle(id, icon, label, initial, fn) {
         var b = document.createElement("button");
-        b.id = id; b.className = "tool-btn" + (initial ? " active" : "");
+        b.id = id; b.className = "tool-btn" + (initial ? " active" : ""); b.title = label;   // native tooltip
         b.innerHTML = window.AudizyIcons[icon] + '<span class="tool-tooltip">' + label + '</span>';
         var on = initial;
         b.addEventListener("click", function () { on = !on; b.classList.toggle("active", on); fn(on); });
@@ -241,6 +263,7 @@
         drawRuler(w);
         drawPlayhead(h);
         drawBladeHover();
+        drawMarquee();
         updateScrollbar();
     }
     function drawLaneBg(w) {
@@ -252,7 +275,7 @@
     function drawSegment(seg) {
         var x0 = timeToX(seg.inPoint), x1 = timeToX(seg.outPoint), w = x1 - x0;
         if (w <= 0 || x1 < 0 || x0 > cssW()) return;
-        var sel = (seg.rcId === st.selRcId);
+        var sel = isSel(seg.rcId);
         var y = LANE_TOP + 2, hh = LANE_H - 4;
         ctx.fillStyle = !seg.audioEnabled ? "#3a2e2e" : (sel ? "#3f6da0" : "#2f4a63");
         ctx.fillRect(x0, y, w, hh);
@@ -299,6 +322,14 @@
         ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, h); ctx.stroke();
         ctx.fillStyle = css("--color-playhead");
         ctx.beginPath(); ctx.moveTo(x - 5, 0); ctx.lineTo(x + 5, 0); ctx.lineTo(x, 7); ctx.closePath(); ctx.fill();
+    }
+    function drawMarquee() {
+        if (!drag || drag.type !== "marquee" || !drag.moved) return;
+        var x0 = Math.min(drag.x0, drag.x), x1 = Math.max(drag.x0, drag.x);
+        ctx.fillStyle = "rgba(74,158,255,0.18)";
+        ctx.fillRect(x0, LANE_TOP, x1 - x0, LANE_H);
+        ctx.strokeStyle = css("--color-focus"); ctx.lineWidth = 1;
+        ctx.strokeRect(x0 + 0.5, LANE_TOP + 0.5, x1 - x0 - 1, LANE_H - 1);
     }
     function drawBladeHover() {
         if (st.tool !== "razor" || st.hoverX < 0) return;
@@ -347,7 +378,13 @@
         if (!res || !res.success) { toast((res && res.error) || "Load failed", true); return; }
         st.group = res; st.playhead = res.currentTime;
         st.lastSig = stateSig(res.segments);
-        if (st.selRcId && !selSeg()) st.selRcId = null;
+        if (st.sel.length) {                              // drop ids that no longer exist
+            var keep = [], segsNow = res.segments || [], a, b;
+            for (a = 0; a < st.sel.length; a++)
+                for (b = 0; b < segsNow.length; b++)
+                    if (segsNow[b].rcId === st.sel[a]) { keep.push(st.sel[a]); break; }
+            st.sel = keep;
+        }
         emptyEl.classList.add("hidden"); timelineEl.classList.remove("hidden");
         // request a waveform for every clip's own source (multi-file safe)
         var segs = res.segments || [];
@@ -416,19 +453,46 @@
     }
     function cutAtPlayhead() { cutAt(st.playhead); }
     function deleteSel() {
-        var s = selSeg(); if (!s) { toast("Select a clip first", true); return; }
-        if (st.group.segments.length <= 1) { toast("Can't delete the last clip", true); return; }
-        var segs = st.group.segments, list = { v: 1, segments: [] };
-        for (var i = 0; i < segs.length; i++) if (segs[i].rcId !== s.rcId)
+        var picked = selSegs(); if (!picked.length) { toast("Select a clip first", true); return; }
+        var segs = st.group.segments;
+        if (picked.length >= segs.length) { toast("Can't delete every clip", true); return; }
+        var list = { v: 1, segments: [] };
+        for (var i = 0; i < segs.length; i++) if (!isSel(segs[i].rcId))
             list.segments.push({ id: segs[i].rcId, srcIn: segs[i].srcIn, srcOut: segs[i].srcOut, compIn: segs[i].inPoint, name: segs[i].name, src: segs[i].sourcePath });
-        st.selRcId = null;
-        applyList(list, "Deleted");
+        st.sel = [];
+        applyList(list, picked.length > 1 ? "Deleted " + picked.length + " clips" : "Deleted");
     }
     function rippleDel() { deleteSel(); }
     function liftDel() { deleteSel(); }
+    // Extract selected clips out of the precomp into its parent comp, same time.
+    function extractSel() {
+        if (!st.group || st.group.precompId == null) { toast("Load a precomp first", true); return; }
+        var picked = selSegs(); if (!picked.length) { toast("Select a clip first", true); return; }
+        var ids = [];
+        for (var i = 0; i < picked.length; i++) ids.push(picked[i].rcId);
+        callJSX("azExtractClips", [st.group.precompId, JSON.stringify(ids)],
+            afterEdit(ids.length > 1 ? "Extracted " + ids.length + " clips" : "Extracted to parent comp"));
+    }
+    // Insert: select an audio layer + a precomp layer in AE, then click. Moves the
+    // audio into the chosen precomp at matching time (any precomp, not just Audizy).
+    function insertSel() {
+        callJSX("azInsertSelected", [], afterEdit("Inserted into precomp"));
+    }
     function selectSeg(seg) {
-        st.selRcId = seg ? seg.rcId : null;
+        setSel(seg ? [seg.rcId] : []);
         render();
+    }
+    function selectAll() {
+        if (!st.group) return;
+        var ids = [], s = st.group.segments;
+        for (var i = 0; i < s.length; i++) ids.push(s[i].rcId);
+        setSel(ids); render();
+    }
+    /** Clips whose span intersects [t0,t1] — used by the marquee. */
+    function segsInRange(t0, t1) {
+        var out = [], s = st.group ? st.group.segments : [];
+        for (var i = 0; i < s.length; i++) if (s[i].outPoint > t0 && s[i].inPoint < t1) out.push(s[i]);
+        return out;
     }
     function movePlayhead(t) {
         st.playhead = Math.max(0, playheadSnap(t));
@@ -539,10 +603,11 @@
         if (st.tool === "zoom") { zoomAt(x, ev.altKey ? 1 / 1.5 : 1.5); return; }
         if (st.tool === "razor" && !onRuler) { cutAt(t); return; }
         // pointer: trim if grabbing a clip edge
+        var addMod = ev.ctrlKey || ev.metaKey || ev.shiftKey;   // add/remove from selection
         if (!onRuler) {
             var eh = edgeHit(x, y);
             if (eh && !st.track.locked && !eh.seg.locked) {
-                selectSeg(eh.seg);
+                if (!isSel(eh.seg.rcId)) selectSeg(eh.seg);      // trim always acts on one clip
                 drag = { type: "trim", edge: eh.edge, rcId: eh.seg.rcId,
                          startTime: eh.seg.startTime, sourceDur: eh.seg.sourceDuration || st.group.sourceDuration || eh.seg.srcOut };
                 return;
@@ -550,15 +615,22 @@
         }
         if (onRuler) { movePlayhead(t); drag = { type: "scrub" }; return; }
         var seg = segAtTime(t);
+        if (seg && addMod) { toggleSel(seg.rcId); render(); drag = null; return; }
         if (seg && !st.track.locked && !seg.locked) {
-            selectSeg(seg);
-            drag = { type: "move", index: seg.index, rcId: seg.rcId, grab: t - seg.inPoint,
-                     origIn: seg.inPoint, origOut: seg.outPoint, origStart: seg.startTime,
+            if (!isSel(seg.rcId)) setSel([seg.rcId]);            // clicking a selected clip keeps the group
+            render();
+            var items = [], picked = selSegs(), k;
+            for (k = 0; k < picked.length; k++)
+                items.push({ rcId: picked[k].rcId, origIn: picked[k].inPoint, origOut: picked[k].outPoint, origStart: picked[k].startTime });
+            drag = { type: "move", rcId: seg.rcId, grab: t - seg.inPoint,
+                     origIn: seg.inPoint, origOut: seg.outPoint, items: items,
                      downX: x, downT: t, moved: false };
         } else if (seg) {
             selectSeg(seg); movePlayhead(t); drag = { type: "scrub" };
         } else {
-            selectSeg(null); movePlayhead(t); drag = { type: "scrub" };
+            // empty lane: drag = marquee, plain click = scrub + clear selection
+            drag = { type: "marquee", x0: x, y0: y, x: x, y: y, t0: t,
+                     base: addMod ? st.sel.slice(0) : [], additive: addMod, downT: t, moved: false };
         }
     });
     window.addEventListener("mousemove", function (ev) {
@@ -572,9 +644,11 @@
                 if (drag.moved) {
                     var newIn = t2 - drag.grab;
                     if (st.snap) { var fr = st.group.frameRate; newIn = Math.round(newIn * fr) / fr; }
+                    var movedIds = [], q;
+                    for (q = 0; q < drag.items.length; q++) movedIds.push(drag.items[q].rcId);
                     if (st.snapClip) {                       // magnetic: snap in OR out edge to other clips / 0 / playhead
                         var segLen = drag.origOut - drag.origIn;
-                        var tg = clipEdges(drag.rcId); tg.push(0); tg.push(st.playhead);
+                        var tg = clipEdgesExcept(movedIds); tg.push(0); tg.push(st.playhead);
                         var thr = snapThr(), bestDelta = 0, bd = thr, m;
                         for (m = 0; m < tg.length; m++) {
                             var di = tg[m] - newIn; if (Math.abs(di) < bd) { bd = Math.abs(di); bestDelta = di; }
@@ -582,10 +656,31 @@
                         }
                         newIn += bestDelta;
                     }
-                    if (newIn < 0) newIn = 0;
                     var d = newIn - drag.origIn;
-                    var seg = segByRc(drag.rcId);
-                    if (seg) { seg.inPoint = drag.origIn + d; seg.outPoint = drag.origOut + d; seg.startTime = drag.origStart + d; render(); }
+                    var minIn = drag.items[0].origIn;        // keep the whole group at t >= 0
+                    for (q = 1; q < drag.items.length; q++) if (drag.items[q].origIn < minIn) minIn = drag.items[q].origIn;
+                    if (minIn + d < 0) d = -minIn;
+                    for (q = 0; q < drag.items.length; q++) {
+                        var it = drag.items[q], sg = segByRc(it.rcId);
+                        if (!sg) continue;
+                        sg.inPoint = it.origIn + d; sg.outPoint = it.origOut + d; sg.startTime = it.origStart + d;
+                    }
+                    render();
+                }
+                return;
+            }
+            if (drag.type === "marquee") {
+                drag.x = lx(ev); drag.y = ly(ev);
+                if (Math.abs(drag.x - drag.x0) > 3) drag.moved = true;
+                if (drag.moved) {
+                    var ta = Math.min(drag.t0, xToTime(drag.x)), tb = Math.max(drag.t0, xToTime(drag.x));
+                    var hit = segsInRange(ta, tb), ids = drag.base.slice(0), h, j2, dup;
+                    for (h = 0; h < hit.length; h++) {
+                        dup = false;
+                        for (j2 = 0; j2 < ids.length; j2++) if (ids[j2] === hit[h].rcId) { dup = true; break; }
+                        if (!dup) ids.push(hit[h].rcId);
+                    }
+                    setSel(ids); render();
                 }
                 return;
             }
@@ -622,7 +717,12 @@
         if (drag && drag.type === "move" && drag.moved) applyList(listFromSegments(), "Moved");
         else if (drag && drag.type === "move") movePlayhead(drag.downT);
         else if (drag && drag.type === "trim" && drag.moved) applyList(listFromSegments(), "Trimmed");
+        else if (drag && drag.type === "marquee" && !drag.moved) {
+            if (!drag.additive) setSel([]);                // plain click on empty lane = clear + scrub
+            movePlayhead(drag.downT);
+        }
         drag = null;
+        render();
     });
     canvas.addEventListener("mouseleave", function () { st.hoverX = -1; if (st.tool === "razor") render(); });
     wrap.addEventListener("wheel", function (ev) {
@@ -674,7 +774,9 @@
         if (ev.target && (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA")) return;
         var k = ev.key.toLowerCase();
         if (k === "k" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); cutAtPlayhead(); return; }
+        if (k === "a" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); selectAll(); return; }
         if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        if (ev.key === "Escape") { setSel([]); render(); return; }
         if (ev.key === " " || k === "spacebar") { ev.preventDefault(); togglePlay(); return; }
         if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); deleteSel(); return; }
         if (k === "v") setTool("pointer");
